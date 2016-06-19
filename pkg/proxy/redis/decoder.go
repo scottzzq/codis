@@ -49,12 +49,13 @@ func btoi(b []byte) (int64, error) {
 	}
 }
 
+//解码结构体
 type Decoder struct {
 	*bufio.Reader
-
 	Err error
 }
 
+//构造函数
 func NewDecoder(br *bufio.Reader) *Decoder {
 	return &Decoder{Reader: br}
 }
@@ -67,6 +68,7 @@ func NewDecoderSize(r io.Reader, size int) *Decoder {
 	return &Decoder{Reader: br}
 }
 
+//解码函数
 func (d *Decoder) Decode() (*Resp, error) {
 	if d.Err != nil {
 		return nil, d.Err
@@ -78,19 +80,34 @@ func (d *Decoder) Decode() (*Resp, error) {
 	return r, err
 }
 
+//从bufio.Reader读取数据
 func Decode(br *bufio.Reader) (*Resp, error) {
 	return NewDecoder(br).Decode()
 }
 
+//从字符串数组中读取数据，将字符串数组转换为bufio.Reader
 func DecodeFromBytes(p []byte) (*Resp, error) {
 	return Decode(bufio.NewReader(bytes.NewReader(p)))
 }
 
+//解码函数
 func (d *Decoder) decodeResp(depth int) (*Resp, error) {
 	b, err := d.ReadByte()
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
+	//TypeString    RespType = '+'
+	//TypeError     RespType = '-'
+	//TypeInt       RespType = ':'
+	//TypeBulkBytes RespType = '$'
+	//TypeArray     RespType = '*'
+	//Redis的通讯协议可以说大集汇了……消息头标识，消息行还有就行里可能还有个数据块大小描述.首先Redis是以行来划分，
+	//每行以\r\n行结束。每一行都有一个消息头，消息头共分为5种分别如下:
+	//	(+) 表示一个正确的状态信息，具体信息是当前行+后面的字符。
+	//	(-) 表示一个错误信息，具体信息是当前行－后面的字符。
+	//	(*) 表示消息体总共有多少行，不包括当前行,*后面是具体的行数。
+	//	($) 表示下一行数据长度，不包括换行符长度\r\n,$后面则是对应的长度的数据。
+	//	(:) 表示返回一个数值，：后面是相应的数字节符。
 	switch t := RespType(b); t {
 	case TypeString, TypeError, TypeInt:
 		r := &Resp{Type: t}

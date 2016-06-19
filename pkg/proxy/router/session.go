@@ -19,7 +19,6 @@ import (
 
 type Session struct {
 	*redis.Conn
-
 	Ops int64
 
 	LastOpUnix int64
@@ -46,10 +45,12 @@ func (s *Session) String() string {
 	return string(b)
 }
 
+//构造函数
 func NewSession(c net.Conn, auth string) *Session {
 	return NewSessionSize(c, auth, 1024*32, 1800)
 }
 
+//构造函数
 func NewSessionSize(c net.Conn, auth string, bufsize int, timeout int) *Session {
 	s := &Session{CreateUnix: time.Now().Unix(), auth: auth}
 	s.Conn = redis.NewConnSize(c, bufsize)
@@ -63,6 +64,7 @@ func (s *Session) Close() error {
 	return s.Conn.Close()
 }
 
+/////////////////////////处理当前session的请求///////////////////////////////
 func (s *Session) Serve(d Dispatcher, maxPipeline int) {
 	var errlist errors.ErrorList
 	defer func() {
@@ -80,6 +82,8 @@ func (s *Session) Serve(d Dispatcher, maxPipeline int) {
 			for _ = range tasks {
 			}
 		}()
+
+		//从tasks中读取response
 		if err := s.loopWriter(tasks); err != nil {
 			errlist.PushBack(err)
 		}
@@ -87,11 +91,14 @@ func (s *Session) Serve(d Dispatcher, maxPipeline int) {
 	}()
 
 	defer close(tasks)
+
+	//从socket中读取请求，放到tasks队列中
 	if err := s.loopReader(tasks, d); err != nil {
 		errlist.PushBack(err)
 	}
 }
 
+///////////////////////从socket中读取请求，处理请求//////////////////////////////////////
 func (s *Session) loopReader(tasks chan<- *Request, d Dispatcher) error {
 	if d == nil {
 		return errors.New("nil dispatcher")
@@ -101,6 +108,7 @@ func (s *Session) loopReader(tasks chan<- *Request, d Dispatcher) error {
 		if err != nil {
 			return err
 		}
+		//处理redis请求
 		r, err := s.handleRequest(resp, d)
 		if err != nil {
 			return err
@@ -109,44 +117,6 @@ func (s *Session) loopReader(tasks chan<- *Request, d Dispatcher) error {
 		}
 	}
 	return nil
-}
-
-func (s *Session) loopWriter(tasks <-chan *Request) error {
-	p := &FlushPolicy{
-		Encoder:     s.Writer,
-		MaxBuffered: 32,
-		MaxInterval: 300,
-	}
-	for r := range tasks {
-		resp, err := s.handleResponse(r)
-		if err != nil {
-			return err
-		}
-		if err := p.Encode(resp, len(tasks) == 0); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-var ErrRespIsRequired = errors.New("resp is required")
-
-func (s *Session) handleResponse(r *Request) (*redis.Resp, error) {
-	r.Wait.Wait()
-	if r.Coalesce != nil {
-		if err := r.Coalesce(); err != nil {
-			return nil, err
-		}
-	}
-	resp, err := r.Response.Resp, r.Response.Err
-	if err != nil {
-		return nil, err
-	}
-	if resp == nil {
-		return nil, ErrRespIsRequired
-	}
-	incrOpStats(r.OpStr, microseconds()-r.Start)
-	return resp, nil
 }
 
 func (s *Session) handleRequest(resp *redis.Resp, d Dispatcher) (*Request, error) {
@@ -199,6 +169,49 @@ func (s *Session) handleRequest(resp *redis.Resp, d Dispatcher) (*Request, error
 	}
 	return r, d.Dispatch(r)
 }
+
+//////////////////////////处理response///////////////////////
+func (s *Session) loopWriter(tasks <-chan *Request) error {
+	p := &FlushPolicy{
+		Encoder:     s.Writer,
+		MaxBuffered: 32,
+		MaxInterval: 300,
+	}
+	for r := range tasks {
+		resp, err := s.handleResponse(r)
+		if err != nil {
+			return err
+		}
+		if err := p.Encode(resp, len(tasks) == 0); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+var ErrRespIsRequired = errors.New("resp is required")
+
+func (s *Session) handleResponse(r *Request) (*redis.Resp, error) {
+	log.Infof("handleResponse wait")
+	r.Wait.Wait()
+	log.Infof("handleResponse finished")
+	if r.Coalesce != nil {
+		if err := r.Coalesce(); err != nil {
+			return nil, err
+		}
+	}
+	resp, err := r.Response.Resp, r.Response.Err
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil {
+		return nil, ErrRespIsRequired
+	}
+	incrOpStats(r.OpStr, microseconds()-r.Start)
+	return resp, nil
+}
+//////////////////////////////////END//////////////////////////
+
 
 func (s *Session) handleQuit(r *Request) (*Request, error) {
 	s.quit = true

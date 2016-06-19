@@ -20,26 +20,29 @@ import (
 	"github.com/CodisLabs/codis/pkg/proxy/router"
 	"github.com/CodisLabs/codis/pkg/utils/log"
 	"github.com/wandoulabs/go-zookeeper/zk"
-	topo "github.com/wandoulabs/go-zookeeper/zk"
+	topo  "github.com/wandoulabs/go-zookeeper/zk"
 )
 
 type Server struct {
 	conf   *Config
+	//zk工具类
 	topo   *Topology
-	info   models.ProxyInfo
-	groups map[int]int
-
-	lastActionSeq int
-
-	evtbus   chan interface{}
+	//路由工具类
 	router   *router.Router
-	listener net.Listener
 
+	info   models.ProxyInfo
+	//slot-index -> group-index
+	groups map[int]int
+	lastActionSeq int
+	evtbus   chan interface{}
+	listener net.Listener
 	kill chan interface{}
+	//join函数使用
 	wait sync.WaitGroup
 	stop sync.Once
 }
 
+//创建ProxyServer
 func New(addr string, debugVarAddr string, conf *Config) *Server {
 	log.Infof("create proxy with config: %+v", conf)
 
@@ -58,6 +61,7 @@ func New(addr string, debugVarAddr string, conf *Config) *Server {
 	}
 
 	s := &Server{conf: conf, lastActionSeq: -1, groups: make(map[int]int)}
+	//创建zk集群通信工具类
 	s.topo = NewTopo(conf.productName, conf.zkAddr, conf.fact, conf.provider, conf.zkSessionTimeout)
 	s.info.Id = conf.proxyId
 	s.info.State = models.PROXY_STATE_OFFLINE
@@ -74,19 +78,25 @@ func New(addr string, debugVarAddr string, conf *Config) *Server {
 	} else {
 		s.listener = l
 	}
+	//创建路由工具类
 	s.router = router.NewWithAuth(conf.passwd)
 	s.evtbus = make(chan interface{}, 1024)
 
+	//zk集群上注册节点
 	s.register()
 
 	s.wait.Add(1)
 	go func() {
+		//阻塞Join函数
 		defer s.wait.Done()
+		//启动服务
 		s.serve()
 	}()
 	return s
 }
 
+//main.go中启动当前ProxyServer之后，会在dashboard中标注在线
+//为什么要给dashboard发送消息？dashboard不能自动从zk集群上获取?
 func (s *Server) SetMyselfOnline() error {
 	log.Info("mark myself online")
 	info := models.ProxyInfo{
@@ -105,24 +115,29 @@ func (s *Server) SetMyselfOnline() error {
 	return nil
 }
 
+//端口监听完，开始服务
 func (s *Server) serve() {
 	defer s.close()
-
 	if !s.waitOnline() {
 		return
 	}
-
+	//监控/zk/codis/db_{productName} 下面子节点的变化
 	s.rewatchNodes()
 
+	//初始化slot映射表
 	for i := 0; i < router.MaxSlotNum; i++ {
 		s.fillSlot(i)
 	}
+
 	log.Info("proxy is serving")
+	//开始处理连接到本机的请求
 	go func() {
 		defer s.close()
+		//开始处理连接上来的客户端请求
 		s.handleConns()
 	}()
 
+	//处理外部事件
 	s.loopEvents()
 }
 
@@ -131,6 +146,7 @@ func (s *Server) handleConns() {
 	defer close(ch)
 
 	go func() {
+		//创建session对象
 		for c := range ch {
 			x := router.NewSessionSize(c, s.conf.passwd, s.conf.maxBufSize, s.conf.maxTimeout)
 			go x.Serve(s.router, s.conf.maxPipeline)
@@ -138,6 +154,7 @@ func (s *Server) handleConns() {
 	}()
 
 	for {
+		//接收到新连接
 		c, err := s.listener.Accept()
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
@@ -177,13 +194,14 @@ func (s *Server) close() {
 	})
 }
 
+//监控路径/zk/codis/db_{productName}/proxy
 func (s *Server) rewatchProxy() {
 	_, err := s.topo.WatchNode(path.Join(models.GetProxyPath(s.topo.ProductName), s.info.Id), s.evtbus)
 	if err != nil {
 		log.PanicErrorf(err, "watch node failed")
 	}
 }
-
+//监控路径/zk/codis/db_{productName}/actions
 func (s *Server) rewatchNodes() []string {
 	nodes, err := s.topo.WatchChildren(models.GetWatchActionPath(s.topo.ProductName), s.evtbus)
 	if err != nil {
@@ -192,6 +210,7 @@ func (s *Server) rewatchNodes() []string {
 	return nodes
 }
 
+//将当前proxy server注册到zk集群上
 func (s *Server) register() {
 	if _, err := s.topo.CreateProxyInfo(&s.info); err != nil {
 		log.PanicErrorf(err, "create proxy node failed")
@@ -216,23 +235,25 @@ func (s *Server) waitOnline() bool {
 		if err != nil {
 			log.PanicErrorf(err, "get proxy info failed: %s", s.info.Id)
 		}
+
 		switch info.State {
-		case models.PROXY_STATE_MARK_OFFLINE:
-			log.Infof("mark offline, proxy got offline event: %s", s.info.Id)
-			s.markOffline()
-			return false
-		case models.PROXY_STATE_ONLINE:
-			s.info.State = info.State
-			log.Infof("we are online: %s", s.info.Id)
-			s.rewatchProxy()
-			return true
+			case models.PROXY_STATE_MARK_OFFLINE:
+				log.Infof("mark offline, proxy got offline event: %s", s.info.Id)
+				s.markOffline()
+				return false
+			case models.PROXY_STATE_ONLINE:
+				s.info.State = info.State
+				log.Infof("we are online: %s", s.info.Id)
+				s.rewatchProxy()
+				return true
 		}
+
 		select {
-		case <-s.kill:
-			log.Infof("mark offline, proxy is killed: %s", s.info.Id)
-			s.markOffline()
-			return false
-		default:
+			case <-s.kill:
+				log.Infof("mark offline, proxy is killed: %s", s.info.Id)
+				s.markOffline()
+				return false
+			default:
 		}
 		log.Infof("wait to be online: %s", s.info.Id)
 		time.Sleep(3 * time.Second)
@@ -281,6 +302,27 @@ func (s *Server) resetSlot(i int) {
 }
 
 func (s *Server) fillSlot(i int) {
+	//slot详情 /zk/codis/db_{productName}/slots/slot_{id}
+	// {
+	//		"product_name": "test",
+	//		"id": 1,
+	//		"group_id": 2,
+	//		"state":{
+	//			"status": "online",
+	//			"migrate_status":{
+	//				"from": -1,
+	//				"to": -1
+	//		},
+	//		"last_op_ts":"0"}
+	//}
+	//group详情 /zk/codis/db_{productName}/servers/group_{id}
+
+	//具体某一台机器 /zk/codis/db_test/servers/group_1/127.0.0.1:6380
+	//{
+	//	"type": "master",
+	//	"group_id": 1,
+	//	"addr": "127.0.0.1:6380"
+	//}
 	slotInfo, slotGroup, err := s.topo.GetSlotByIndex(i)
 	if err != nil {
 		log.PanicErrorf(err, "get slot by index failed", i)
@@ -357,23 +399,138 @@ func (s *Server) checkAndDoTopoChange(seq int) bool {
 	log.Warnf("action %v receivers %v", seq, act.Receivers)
 
 	switch act.Type {
-	case models.ACTION_TYPE_SLOT_MIGRATE, models.ACTION_TYPE_SLOT_CHANGED,
-		models.ACTION_TYPE_SLOT_PREMIGRATE:
-		slot := &models.Slot{}
-		s.getActionObject(seq, slot)
-		s.fillSlot(slot.Id)
-	case models.ACTION_TYPE_SERVER_GROUP_CHANGED:
-		serverGroup := &models.ServerGroup{}
-		s.getActionObject(seq, serverGroup)
-		s.onGroupChange(serverGroup.Id)
-	case models.ACTION_TYPE_SERVER_GROUP_REMOVE:
-	//do not care
-	case models.ACTION_TYPE_MULTI_SLOT_CHANGED:
-		param := &models.SlotMultiSetParam{}
-		s.getActionObject(seq, param)
-		s.onSlotRangeChange(param)
-	default:
-		log.Panicf("unknown action %+v", act)
+		//slot变更
+		//{
+		//	"type": "slot_changed",
+		//	"desc":"",
+		//	"target":{
+		//		"product_name":"test",
+		//		"id":0,
+		//		"group_id":-1,
+		//		"state":{
+		//			"status":"offline",
+		//			"migrate_status":{"from":-1,"to":-1},
+		//			"last_op_ts":"0"
+		//		}
+		//	},
+		//	"ts":"1464995689",
+		//	"receivers":null
+		//}
+
+		//slot预备迁移
+		//{
+		//	"type":"slot_premigrate",
+		//	"desc":"",
+		//	"target":{
+		//		"product_name":"test",
+		//		"id":83,
+		//		"group_id":1,
+		//		"state":{
+		//			"status":"pre_migrate",
+		//			"migrate_status":{"from":-1,"to":-1},
+		//			"last_op_ts":"0"}
+		//		},
+		//	"ts":"1465032855",
+		//	"receivers":[
+		//		"{
+		//			\"id\":\"proxy_1\",
+		//			\"addr\":\"MacBook-Pro.local:19000\",
+		//			\"last_event\":\"\",
+		//			\"last_event_ts\":0,
+		//			\"state\":\"online\",
+		//			\"description\":\"\",
+		//			\"debug_var_addr\":\"MacBook-Pro.local:11000\",
+		//			\"pid\":12503,
+		//			\"start_at\":\"2016-06-04 17:29:05.460142962 +0800 CST\"
+		//		}"
+		//	]
+		//}
+
+		//slot迁移
+		//{
+		//	"type":"slot_migrate",
+		//	"desc":"",
+		//	"target":{
+		//		"product_name":"test",
+		//		"id":83,
+		//		"group_id":2,
+		//		"state":{
+		//			"status":"migrate",
+		//			"migrate_status":{"from":1,"to":2},
+		//			"last_op_ts":"0"
+		//		}
+		//	},
+		//	"ts":"1465032855",
+		//	"receivers":[
+		//		"{
+		//			\"id\":\"proxy_1\",
+		//			\"addr\":\"MacBook-Pro.local:19000\",
+		//			\"last_event\":\"\",
+		//			\"last_event_ts\":0,
+		//			\"state\":\"online\",
+		//			\"description\":\"\",
+		//			\"debug_var_addr\":\"MacBook-Pro.local:11000\",
+		//			\"pid\":12503,
+		//			\"start_at\":\"2016-06-04 17:29:05.460142962 +0800 CST\"
+		//		}"
+		//	]
+		//}
+		case models.ACTION_TYPE_SLOT_MIGRATE, models.ACTION_TYPE_SLOT_CHANGED,
+			models.ACTION_TYPE_SLOT_PREMIGRATE:
+			slot := &models.Slot{}
+			s.getActionObject(seq, slot)
+			s.fillSlot(slot.Id)
+			
+		//{
+		//	"type":"group_changed",
+		//	"desc":"",
+		//	"target":{
+		//		"id":1,
+		//		"product_name":"test",
+		//		"servers":null
+		//	},
+		//	"ts":"1464995710",
+		//	"receivers":null
+		//}
+
+		//{
+		//	"type":"group_changed",
+		//	"desc":"",
+		//	"target":{
+		//		"id":1,	
+		//		"product_name":"test",
+		//		"servers":[
+		//			{"type":"master","group_id":1,"addr":"127.0.0.1:6380"}
+		//		]
+		//	},
+		//	"ts":"1464995723",
+		//	"receivers":null
+		//}
+		case models.ACTION_TYPE_SERVER_GROUP_CHANGED:
+			serverGroup := &models.ServerGroup{}
+			s.getActionObject(seq, serverGroup)
+			s.onGroupChange(serverGroup.Id)
+		case models.ACTION_TYPE_SERVER_GROUP_REMOVE:
+		//do not care
+
+		//{
+		//	"type":"multi_slot_changed",
+		//	"desc":"",
+		//	"target":{
+		//		"from":0,
+		//		"to":300,
+		//		"status":"online",
+		//		"group_id":1
+		//	},
+		//	"ts":"1464995838",
+		//	"receivers":null
+		//}
+		case models.ACTION_TYPE_MULTI_SLOT_CHANGED:
+			param := &models.SlotMultiSetParam{}
+			s.getActionObject(seq, param)
+			s.onSlotRangeChange(param)
+		default:
+			log.Panicf("unknown action %+v", act)
 	}
 	return true
 }
@@ -411,6 +568,7 @@ func (s *Server) processAction(e interface{}) {
 	//get last pos
 	index := -1
 	for i, seq := range seqs {
+		log.Infof("seq:%d", seq)
 		if s.lastActionSeq < seq {
 			index = i
 			//break
@@ -418,12 +576,14 @@ func (s *Server) processAction(e interface{}) {
 		}
 	}
 
+	log.Infof("index:%d", index)
 	if index < 0 {
 		return
 	}
 
 	actions := seqs[index:]
 	for _, seq := range actions {
+		//路径上面创建回复 /zk/codis/db_test/ActionResponse
 		exist, err := s.topo.Exist(path.Join(s.topo.GetActionResponsePath(seq), s.info.Id))
 		if err != nil {
 			log.PanicErrorf(err, "get action failed")
@@ -431,6 +591,7 @@ func (s *Server) processAction(e interface{}) {
 		if exist {
 			continue
 		}
+
 		if s.checkAndDoTopoChange(seq) {
 			s.responseAction(int64(seq))
 		}
@@ -439,6 +600,7 @@ func (s *Server) processAction(e interface{}) {
 	s.lastActionSeq = seqs[len(seqs)-1]
 }
 
+//接收外部事件
 func (s *Server) loopEvents() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()

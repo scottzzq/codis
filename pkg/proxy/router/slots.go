@@ -14,13 +14,15 @@ import (
 
 type Slot struct {
 	id int
-
+	//redis后端连接池
 	backend struct {
 		addr string
 		host []byte
 		port []byte
 		bc   *SharedBackendConn
 	}
+	
+	//slot迁移任务
 	migrate struct {
 		from string
 		bc   *SharedBackendConn
@@ -33,6 +35,7 @@ type Slot struct {
 	}
 }
 
+//在reset当前slot的时候需要加锁保护，需要等在当前slot上的请求全部完成之后才可以开始resetslot
 func (s *Slot) blockAndWait() {
 	if !s.lock.hold {
 		s.lock.hold = true
@@ -41,6 +44,7 @@ func (s *Slot) blockAndWait() {
 	s.wait.Wait()
 }
 
+//reset完slot需要解锁
 func (s *Slot) unblock() {
 	if !s.lock.hold {
 		return

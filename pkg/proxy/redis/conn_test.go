@@ -30,13 +30,16 @@ func newConnPair() (*Conn, *Conn) {
 			if err != nil {
 				return
 			}
+			//server-client client
 			cc <- NewConnSize(c, bufsize)
 		}
 	}()
 
+	//client-server socket
 	conn1, err := DialTimeout(l.Addr().String(), bufsize, time.Millisecond*50)
 	assert.MustNoError(err)
 
+	//server-client socket
 	conn2, ok := <-cc
 	assert.Must(ok)
 	return conn1, conn2
@@ -105,8 +108,8 @@ func TestConnWriterTimeout(t *testing.T) {
 			if err := conn2.Writer.Encode(resp, true); err != nil {
 				assert.Must(IsTimeout(err))
 				return
-			}
-			count.Incr()
+			}count
+			.Incr()
 		}
 	}()
 

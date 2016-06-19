@@ -50,12 +50,14 @@ func itob(i int64) []byte {
 	return []byte(strconv.FormatInt(i, 10))
 }
 
+//编码结构体
 type Encoder struct {
 	*bufio.Writer
 
 	Err error
 }
 
+//构造函数
 func NewEncoder(bw *bufio.Writer) *Encoder {
 	return &Encoder{Writer: bw}
 }
@@ -68,6 +70,7 @@ func NewEncoderSize(w io.Writer, size int) *Encoder {
 	return &Encoder{Writer: bw}
 }
 
+//编码函数，编码结果写入
 func (e *Encoder) Encode(r *Resp, flush bool) error {
 	if e.Err != nil {
 		return e.Err
@@ -82,15 +85,18 @@ func (e *Encoder) Encode(r *Resp, flush bool) error {
 	return err
 }
 
+//编码结果写入bufio.Writer
 func Encode(bw *bufio.Writer, r *Resp, flush bool) error {
 	return NewEncoder(bw).Encode(r, flush)
 }
 
+//编码结果写入byte字节数组中
 func EncodeToBytes(r *Resp) ([]byte, error) {
 	var b = &bytes.Buffer{}
 	err := Encode(bufio.NewWriter(b), r, true)
 	return b.Bytes(), err
 }
+
 
 func (e *Encoder) encodeResp(r *Resp) error {
 	if err := e.WriteByte(byte(r.Type)); err != nil {

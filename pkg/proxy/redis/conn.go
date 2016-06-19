@@ -43,6 +43,7 @@ func (c *Conn) Close() error {
 	return c.Sock.Close()
 }
 
+
 type connReader struct {
 	*Conn
 	hasDeadline bool

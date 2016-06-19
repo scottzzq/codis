@@ -182,11 +182,13 @@ func main() {
 	s := proxy.New(addr, httpAddr, conf)
 	defer s.Close()
 
+	//调试功能 /debug/vars
 	stats.PublishJSONFunc("router", func() string {
 		var m = make(map[string]interface{})
 		m["ops"] = router.OpCounts()
 		m["cmds"] = router.GetAllOpStats()
 		m["info"] = s.Info()
+		m["name"] = "zhaizhiqiang"
 		m["build"] = map[string]interface{}{
 			"version": utils.Version,
 			"compile": utils.Compile,

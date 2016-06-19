@@ -30,6 +30,7 @@ func NewBackendConn(addr, auth string) *BackendConn {
 	return bc
 }
 
+//处理请求线程
 func (bc *BackendConn) Run() {
 	log.Infof("backend conn [%p] to %s, start service", bc, bc.addr)
 	for k := 0; ; k++ {
